@@ -11,9 +11,11 @@ class Program
         {
             var connectionSupport = RetryUntilSuccess(SelectConnectorToImport);
             var connectionDetails = RetryUntilSuccess(connectionSupport.GetConnectionDetailsForSelection);
+            Console.WriteLine("Connection details obtained successfully.");
             var selectedToImport = RetryUntilSuccess(() =>
                 connectionSupport.SelectToImport(connectionDetails)
             );
+            Console.WriteLine($"You have selected to import from: {selectedToImport}");
             var connection = connectionSupport.GetConnection(connectionDetails, selectedToImport);
             Console.Clear();
             try
@@ -40,7 +42,7 @@ class Program
 
         while (true)
         {
-            Console.Clear();
+            //Console.Clear();
             if (!string.IsNullOrEmpty(errorMessage))
             {
                 Console.WriteLine($"Error: {errorMessage}");

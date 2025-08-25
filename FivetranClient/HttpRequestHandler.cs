@@ -5,6 +5,8 @@ namespace FivetranClient;
 
 public class HttpRequestHandler
 {
+    private const int cacheDurationInMinutes = 60;
+    private const int retryDelayInSeconds = 60;
     private readonly HttpClient _client;
     private readonly SemaphoreSlim? _semaphore;
     private readonly object _lock = new();
@@ -20,57 +22,74 @@ public class HttpRequestHandler
     /// </remarks>
     public HttpRequestHandler(HttpClient client, ushort maxConcurrentRequests = 0)
     {
-        this._client = client;
+        _client = client ?? throw new ArgumentNullException(nameof(client));
         if (maxConcurrentRequests > 0)
         {
-            this._semaphore = new SemaphoreSlim(0, maxConcurrentRequests);
+            _semaphore = new SemaphoreSlim(maxConcurrentRequests, maxConcurrentRequests);
         }
     }
 
     public async Task<HttpResponseMessage> GetAsync(string url, CancellationToken cancellationToken)
     {
-        return _responseCache.GetOrAdd(
+        return await _responseCache.GetOrAddAsync(
             url,
-            () => this._GetAsync(url, cancellationToken).Result,
-            TimeSpan.FromMinutes(60));
+            () => _GetAsync(url, cancellationToken),
+            TimeSpan.FromMinutes(cacheDurationInMinutes));
     }
 
     private async Task<HttpResponseMessage> _GetAsync(string url, CancellationToken cancellationToken)
     {
-        if (this._semaphore is not null)
-        {
-            await this._semaphore.WaitAsync(cancellationToken);
-        }
-
         TimeSpan timeToWait;
-        lock (this._lock)
+        lock (_lock)
         {
-            timeToWait = this._retryAfterTime - DateTime.UtcNow;
+            timeToWait = _retryAfterTime - DateTime.UtcNow;
         }
-
         if (timeToWait > TimeSpan.Zero)
         {
             await Task.Delay(timeToWait, cancellationToken);
         }
 
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var response = await this._client.GetAsync(new Uri(url, UriKind.Relative), cancellationToken);
-        response.EnsureSuccessStatusCode();
-        if (response.StatusCode is HttpStatusCode.TooManyRequests)
+        if (_semaphore is not null)
         {
-            var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(60);
-
-            lock (this._lock)
-            {
-                this._retryAfterTime = DateTime.UtcNow.Add(retryAfter);
-            }
-
-            // new request will wait for the specified time before retrying
-            return await this._GetAsync(url, cancellationToken);
+            await _semaphore.WaitAsync(cancellationToken);
         }
 
-        this._semaphore?.Release();
-        return response;
+        try
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            // support for both absolute and relative URIs
+            var uri = Uri.TryCreate(url, UriKind.Absolute, out var abs) ? abs : new Uri(url, UriKind.Relative);
+
+            while (true)
+            {
+                var response = await _client.GetAsync(uri, cancellationToken);
+
+                if (response.StatusCode == HttpStatusCode.TooManyRequests)
+                {
+                    var retryAfter = response.Headers.RetryAfter?.Delta ?? TimeSpan.FromSeconds(retryDelayInSeconds);
+
+                    lock (_lock)
+                    {
+                        _retryAfterTime = DateTime.UtcNow.Add(retryAfter);
+                    }
+
+                    response.Dispose();
+
+                    var waitTime = _retryAfterTime - DateTime.UtcNow;
+                    if (waitTime > TimeSpan.Zero)
+                        await Task.Delay(waitTime, cancellationToken);
+
+                    continue;
+                }
+
+                response.EnsureSuccessStatusCode();
+                return response;
+            }
+        }
+        finally
+        {
+            _semaphore?.Release();
+        }
+
     }
 }

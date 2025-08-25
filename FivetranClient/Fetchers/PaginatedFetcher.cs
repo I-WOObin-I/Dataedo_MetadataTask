@@ -11,8 +11,12 @@ public sealed class PaginatedFetcher(HttpRequestHandler requestHandler) : BaseFe
 
     public IAsyncEnumerable<T> FetchItemsAsync<T>(string endpoint, CancellationToken cancellationToken)
     {
-        var firstPageTask = this.FetchPageAsync<T>(endpoint, cancellationToken);
-        return this.ProcessPagesRecursivelyAsync(endpoint, firstPageTask, cancellationToken);
+        if (string.IsNullOrWhiteSpace(endpoint))
+            throw new ArgumentException("Endpoint cannot be null or whitespace.", nameof(endpoint));
+
+        var firstPageTask = FetchPageAsync<T>(endpoint, cancellationToken);
+        
+        return ProcessPagesRecursivelyAsync(endpoint, firstPageTask, cancellationToken);
     }
 
     private async Task<PaginatedRoot<T>?> FetchPageAsync<T>(
@@ -20,9 +24,13 @@ public sealed class PaginatedFetcher(HttpRequestHandler requestHandler) : BaseFe
         CancellationToken cancellationToken,
         string? cursor = null)
     {
-        var response = cursor is null
-            ? await base.RequestHandler.GetAsync($"{endpoint}?limit={PageSize}", cancellationToken)
-            : await base.RequestHandler.GetAsync($"{endpoint}?limit={PageSize}&cursor={WebUtility.UrlEncode(cursor)}", cancellationToken);
+        var url = cursor is null
+            ? $"{endpoint}?limit={PageSize}"
+            : $"{endpoint}?limit={PageSize}&cursor={WebUtility.UrlEncode(cursor)}";
+
+        var response = await base.RequestHandler.GetAsync(url, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
         var content = await response.Content.ReadAsStringAsync(cancellationToken);
         return JsonSerializer.Deserialize<PaginatedRoot<T>>(content, SerializerOptions);
     }
@@ -41,8 +49,8 @@ public sealed class PaginatedFetcher(HttpRequestHandler requestHandler) : BaseFe
         if (!string.IsNullOrWhiteSpace(nextCursor))
         {
             // fire and forget (await after yielding current items)
-            var nextTask = this.FetchPageAsync<T>(endpoint, cancellationToken, nextCursor);
-            nextResults = this.ProcessPagesRecursivelyAsync(endpoint, nextTask, cancellationToken);
+            var nextTask = FetchPageAsync<T>(endpoint, cancellationToken, nextCursor);
+            nextResults = ProcessPagesRecursivelyAsync(endpoint, nextTask, cancellationToken);
         }
 
         foreach (var item in currentPage?.Data?.Items ?? [])
@@ -53,6 +61,7 @@ public sealed class PaginatedFetcher(HttpRequestHandler requestHandler) : BaseFe
 
         if (nextResults is null)
             yield break;
+
         await foreach (var nextItem in nextResults.WithCancellation(cancellationToken))
         {
             yield return nextItem;

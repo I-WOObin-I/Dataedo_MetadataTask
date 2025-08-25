@@ -2,5 +2,5 @@
 
 public class Table
 {
-    public string NameInDestination { get; set; }
+    public required string NameInDestination { get; set; }
 }

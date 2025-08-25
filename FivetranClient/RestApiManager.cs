@@ -7,12 +7,13 @@ namespace FivetranClient;
 
 public class RestApiManager(HttpRequestHandler requestHandler) : IDisposable
 {
+    public static readonly Uri ApiBaseUrl = new("https://api.fivetran.com/v1/");
+
     private readonly PaginatedFetcher _paginatedFetcher = new(requestHandler);
     private readonly NonPaginatedFetcher _nonPaginatedFetcher = new(requestHandler);
     // Indicates whether this instance owns the HttpClient and should dispose it.
     private readonly HttpClient? _createdClient;
-
-    public static readonly Uri ApiBaseUrl = new("https://api.fivetran.com/v1/");
+    private bool _disposed = false;
 
     public RestApiManager(string apiKey, string apiSecret, TimeSpan timeout)
         : this(ApiBaseUrl, apiKey, apiSecret, timeout)
@@ -24,7 +25,8 @@ public class RestApiManager(HttpRequestHandler requestHandler) : IDisposable
     {
     }
 
-    private RestApiManager(HttpClient client, bool _) : this(new HttpRequestHandler(client)) => this._createdClient = client;
+    private RestApiManager(HttpClient client, bool _)
+        : this(new HttpRequestHandler(client)) => _createdClient = client;
 
     public RestApiManager(HttpClient client) : this(new HttpRequestHandler(client))
     {
@@ -32,27 +34,53 @@ public class RestApiManager(HttpRequestHandler requestHandler) : IDisposable
 
     public IAsyncEnumerable<Group> GetGroupsAsync(CancellationToken cancellationToken)
     {
+        ThrowIfDisposed();
         var endpointPath = "groups";
-        return this._paginatedFetcher.FetchItemsAsync<Group>(endpointPath, cancellationToken);
+        return _paginatedFetcher.FetchItemsAsync<Group>(endpointPath, cancellationToken);
     }
 
     public IAsyncEnumerable<Connector> GetConnectorsAsync(string groupId, CancellationToken cancellationToken)
     {
-        var endpointPath = $"groups/{WebUtility.UrlEncode(groupId)}/connectors";
-        return this._paginatedFetcher.FetchItemsAsync<Connector>(endpointPath, cancellationToken);
+        ThrowIfDisposed();
+        if (string.IsNullOrWhiteSpace(groupId)) throw new ArgumentException("groupId cannot be null or empty.", nameof(groupId));
+
+        var endpointPath = $"groups/{Uri.EscapeDataString(groupId)}/connectors";
+        return _paginatedFetcher.FetchItemsAsync<Connector>(endpointPath, cancellationToken);
     }
 
     public async Task<DataSchemas?> GetConnectorSchemasAsync(
         string connectorId,
         CancellationToken cancellationToken)
     {
-        var endpointPath = $"connectors/{WebUtility.UrlEncode(connectorId)}/schemas";
-        return await this._nonPaginatedFetcher.FetchAsync<DataSchemas>(endpointPath, cancellationToken);
+        ThrowIfDisposed();
+        if (string.IsNullOrWhiteSpace(connectorId)) throw new ArgumentException("connectorId cannot be null or empty.", nameof(connectorId));
+
+        var endpointPath = $"connectors/{Uri.EscapeDataString(connectorId)}/schemas";
+        return await _nonPaginatedFetcher.FetchAsync<DataSchemas>(endpointPath, cancellationToken);
+    }
+
+    private void ThrowIfDisposed()
+    {
+        if (_disposed) throw new ObjectDisposedException(nameof(RestApiManager));
     }
 
     public void Dispose()
     {
-        _createdClient?.Dispose();
+        Dispose(true);
         GC.SuppressFinalize(this);
     }
+
+    protected virtual void Dispose(bool disposing)
+    {
+        if (_disposed)
+            return;
+
+        if (disposing)
+        {
+            _createdClient?.Dispose();
+        }
+        _disposed = true;
+    }
+
+    ~RestApiManager() => Dispose();
 }

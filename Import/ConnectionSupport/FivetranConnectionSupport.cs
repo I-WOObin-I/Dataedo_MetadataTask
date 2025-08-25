@@ -1,20 +1,23 @@
 ﻿using FivetranClient;
+using FivetranClient.Models;
 using Import.Helpers.Fivetran;
+using System.Collections.Concurrent;
+using System.Runtime.ConstrainedExecution;
+using System.Text;
 
 namespace Import.ConnectionSupport;
 
 // equivalent of database is group in Fivetran terminology
 public class FivetranConnectionSupport : IConnectionSupport
 {
+    private const int timeoutInSeconds = 40;
     public const string ConnectorTypeCode = "FIVETRAN";
     private record FivetranConnectionDetailsForSelection(string ApiKey, string ApiSecret);
 
     public object? GetConnectionDetailsForSelection()
     {
-        Console.Write("Provide your Fivetran API Key: ");
-        var apiKey = Console.ReadLine() ?? throw new ArgumentNullException();
-        Console.Write("Provide your Fivetran API Secret: ");
-        var apiSecret = Console.ReadLine() ?? throw new ArgumentNullException();
+        var apiKey = PromptValidString("Provide your Fivetran API Key: ");
+        var apiSecret = PromptValidString("Provide your Fivetran API Secret: ");
 
         return new FivetranConnectionDetailsForSelection(apiKey, apiSecret);
     }
@@ -30,7 +33,7 @@ public class FivetranConnectionSupport : IConnectionSupport
             new RestApiManager(
                 details.ApiKey,
                 details.ApiSecret,
-                TimeSpan.FromSeconds(40)),
+                TimeSpan.FromSeconds(timeoutInSeconds)),
             selectedToImport ?? throw new ArgumentNullException(nameof(selectedToImport)));
     }
 
@@ -55,26 +58,27 @@ public class FivetranConnectionSupport : IConnectionSupport
         {
             throw new ArgumentException("Invalid connection details provided.");
         }
-        using var restApiManager = new RestApiManager(details.ApiKey, details.ApiSecret, TimeSpan.FromSeconds(40));
+        using var restApiManager = new RestApiManager(details.ApiKey, details.ApiSecret, TimeSpan.FromSeconds(timeoutInSeconds));
         var groups = restApiManager
             .GetGroupsAsync(CancellationToken.None)
-            .ToBlockingEnumerable();
-        if (!groups.Any())
+            .ToBlockingEnumerable()
+            .ToList();
+
+        if (groups.Count == 0)
         {
             throw new Exception("No groups found in Fivetran account.");
         }
 
-        // bufforing for performance
-        var consoleOutputBuffer = "";
-        consoleOutputBuffer += "Available groups in Fivetran account:\n";
-        var elementIndex = 1;
+        // bufforing with StringBuilder for performance
+        var consoleOutputBuffer = new StringBuilder("Available groups in Fivetran account:\n");
+        var elemId = 1;
         foreach (var group in groups)
         {
-            consoleOutputBuffer += $"{elementIndex++}. {group.Name} (ID: {group.Id})\n";
+            consoleOutputBuffer.AppendLine($"{elemId++}. {group.Name} (ID: {group.Id})");
         }
-        consoleOutputBuffer += "Please select a group to import from (by number): ";
-        Console.Write(consoleOutputBuffer);
-        var input = Console.ReadLine();
+        Console.WriteLine(consoleOutputBuffer);
+
+        var input = PromptValidString("Please select a group to import from (by number): ");
         if (string.IsNullOrWhiteSpace(input)
             || !int.TryParse(input, out var selectedIndex)
             || selectedIndex < 1
@@ -99,28 +103,43 @@ public class FivetranConnectionSupport : IConnectionSupport
 
         var connectors = restApiManager
             .GetConnectorsAsync(groupId, CancellationToken.None)
-            .ToBlockingEnumerable();
+            .ToBlockingEnumerable()
+            .ToList();
+
         if (!connectors.Any())
         {
             throw new Exception("No connectors found in the selected group.");
         }
 
-        var allMappingsBuffer = "Lineage mappings:\n";
-        Parallel.ForEach(connectors, connector =>
+        var mappingsBuffer = new ConcurrentBag<string>();
+        Parallel.ForEachAsync(connectors, async(connector, ct) =>
         {
-            var connectorSchemas = restApiManager
-                .GetConnectorSchemasAsync(connector.Id, CancellationToken.None)
-                .Result;
+            var connectorSchemas = await restApiManager
+                .GetConnectorSchemasAsync(connector.Id, ct)
+                .ConfigureAwait(false);
 
             foreach (var schema in connectorSchemas?.Schemas ?? [])
             {
                 foreach (var table in schema.Value?.Tables ?? [])
                 {
-                    allMappingsBuffer += $"  {connector.Id}: {schema.Key}.{table.Key} -> {schema.Value?.NameInDestination}.{table.Value.NameInDestination}\n";
+                    mappingsBuffer.Add($"  {connector.Id}: {schema.Key}.{table.Key} -> {schema.Value?.NameInDestination}.{table.Value.NameInDestination}\n");
                 }
             }
         });
 
+        var allMappingsBuffer = "Lineage mappings:\n" + mappingsBuffer.ToList();
         Console.WriteLine(allMappingsBuffer);
+    }
+
+    private static string PromptValidString(string prompt)
+    {
+        Console.Write(prompt);
+        var input = Console.ReadLine();
+        if (string.IsNullOrWhiteSpace(input))
+        {
+            Console.WriteLine("input null or white space");
+            throw new ArgumentNullException("input null or white space");
+        }
+        return input;
     }
 }
